@@ -4,6 +4,7 @@ import torch
 import torchaudio
 from torch import Tensor
 import torch.nn as nn
+import pydct
 
 try:
     from asteroid_filterbanks.enc_dec import Encoder, Decoder
@@ -13,7 +14,7 @@ except ImportError:
     pass
 
 
-def make_filterbanks(n_fft=4096, n_hop=1024, center=False, sample_rate=44100.0, method="torch"):
+def make_filterbanks(n_fft=4096, n_hop=1024, center=False, sample_rate=44100.0, method="dct"):
     window = nn.Parameter(torch.hann_window(n_fft), requires_grad=False)
 
     if method == "torch":
@@ -30,6 +31,9 @@ def make_filterbanks(n_fft=4096, n_hop=1024, center=False, sample_rate=44100.0, 
         )
         encoder = AsteroidSTFT(fb)
         decoder = AsteroidISTFT(fb)
+    elif method=="dct":
+        encoder = TorchSTDCT(n_fft = n_fft,n_hope=n_hop,window=window, center=center)
+        decoder = TorchISTDCT(n_fft = n_fft,n_hope=n_hop,window=window, center=center)
     else:
         raise NotImplementedError
     return encoder, decoder
@@ -53,6 +57,111 @@ class AsteroidISTFT(nn.Module):
     def forward(self, X: Tensor, length: Optional[int] = None) -> Tensor:
         aux = from_torchaudio(X)
         return self.dec(aux, length=length)
+
+class TorchSTDCT(nn.Module):
+    """Multichannel Short-Time Discrete Cosine transform
+    uses hard coded hann_window.
+    Args:
+        n_dct (int, optional): transform DCT size. Defaults to 4096.
+        n_hop (int, optional): transform hop size. Defaults to 1024.
+        center (bool, optional): If True, the signals first window is
+            zero padded. Centering is required for a perfect
+            reconstruction of the signal. However, during training
+            of spectrogram models, it can safely turned off.
+            Defaults to `true`
+        window (nn.Parameter, optional): window function
+    """
+
+    def __init__(
+        self,
+        n_dct: int = 4096,
+        n_hop: int = 1024,
+        center: bool = False,
+        window: Optional[nn.Parameter] = None,
+    ):
+        super(TorchSTDCT, self).__init__()
+        if window is None:
+            self.window = torch.hamming_window
+        else:
+            self.window = window
+        
+        self.n_dct = n_dct
+        self.n_hop = n_hop
+        self.center = center
+    
+    def forward(self,x: Tensor) -> Tensor:
+        shape = x.size()
+        nb_samples, nb_channels, nb_timesteps = shape
+
+        # pack batch
+        x = x.view(-1, shape[-1])
+
+        complex_stdct = pydct.sdct_torch(
+            x,
+            n_dct,
+            n_hop,
+            window = self.window
+        )
+        stdct_f = torch.view_as_real(complex_stdct)
+        # unpack batch
+        stdct_f = stdct_f.view(shape[:-1] + stdct_f.shape[-3:])
+        return stdct_f
+
+
+class TorchISTDCT(nn.Module):
+    """Multichannel Inverse-Short-Time Discrete Cosine Transform
+    Args:
+        STDCT (Tensor): complex stdct of
+            shape (nb_samples, nb_channels, nb_bins, nb_frames, complex=2)
+            last axis is stacked real and imaginary
+        n_dct (int, optional): transform DCT size. Defaults to 4096.
+        n_hop (int, optional): transform hop size. Defaults to 1024.
+        window (callable, optional): window function
+        center (bool, optional): If True, the signals first window is
+            zero padded. Centering is required for a perfect
+            reconstruction of the signal. However, during training
+            of spectrogram models, it can safely turned off.
+            Defaults to `true`
+        length (int, optional): audio signal length to crop the signal
+    Returns:
+        x (Tensor): audio waveform of
+            shape (nb_samples, nb_channels, nb_timesteps)
+    """
+
+    def __init__(
+        self,
+        n_dct: int = 4096,
+        n_hop: int = 1024,
+        center: bool = False,
+        sample_rate: float = 44100.0,
+        window: Optional[nn.Parameter] = None,
+    ) -> None:
+        super(TorchIstdct, self).__init__()
+
+        self.n_dct = n_dct
+        self.n_hop = n_hop
+        self.center = center
+        self.sample_rate = sample_rate
+
+        if window is None:
+            self.window = torch.hamming_window
+        else:
+            self.window = window
+
+    def forward(self, X: Tensor, length: Optional[int] = None) -> Tensor:
+        # shape = X.size()
+        # X = X.reshape(-1, shape[-3], shape[-2], shape[-1])
+
+        y = pydct.isdct_torch(
+            dcts=X,
+            frame_step=self.n_hop,
+            frame_length=self.n_dct,
+            window=self.window,
+        )
+
+        y = y.reshape(shape[:-3] + y.shape[-1:])
+
+        return y
 
 
 class TorchSTFT(nn.Module):
