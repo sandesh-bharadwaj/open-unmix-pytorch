@@ -202,6 +202,13 @@ def main():
         "--no-cuda", action="store_true", default=False, help="disables CUDA training"
     )
 
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="torch",
+        help="Method to extract spectrogram (options are torch(stft), asteroid (stft), dct (stdct)"
+    )
+
     args, _ = parser.parse_known_args()
 
     torchaudio.set_audio_backend(args.audio_backend)
@@ -231,7 +238,7 @@ def main():
     valid_sampler = torch.utils.data.DataLoader(valid_dataset, batch_size=1, **dataloader_kwargs)
 
     stft, _ = transforms.make_filterbanks(
-        n_fft=args.nfft, n_hop=args.nhop, sample_rate=train_dataset.sample_rate
+        n_fft=args.nfft, n_hop=args.nhop, sample_rate=train_dataset.sample_rate, method = args.method
     )
     encoder = torch.nn.Sequential(stft, model.ComplexNorm(mono=args.nb_channels == 1)).to(device)
 
